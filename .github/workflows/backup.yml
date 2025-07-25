@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       repo:
-        description: '目标项目仓库（如 owner/repo）'
+        description: '目标项目仓库（格式: owner/repo）'
         required: true
         type: string
       release_tag:
@@ -15,36 +15,50 @@ on:
 jobs:
   sync-release:
     runs-on: ubuntu-latest
+
     steps:
       - name: 设置变量
-        id: vars
         run: |
           echo "REPO=${{ github.event.inputs.repo }}" >> $GITHUB_ENV
           echo "RELEASE_TAG=${{ github.event.inputs.release_tag }}" >> $GITHUB_ENV
 
-      - name: 获取 Release 信息
-        id: release_info
+      - name: 安装 GitHub CLI（gh）
+        uses: cli/cli-action@v2
+        with:
+          version: latest
+
+      - name: 检查并创建当前仓库的 Release（如不存在）
         run: |
-          release_url="https://api.github.com/repos/${{ env.REPO }}/releases/tags/${{ env.RELEASE_TAG }}"
-          echo "Release URL: $release_url"
-          assets=$(curl -s "$release_url" | jq -r '.assets[] | "\(.name) \(.browser_download_url)"')
-          echo "$assets" > assets.txt
+          echo "检查是否存在 release tag: $RELEASE_TAG"
+          if ! gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "🔧 当前仓库未找到 Release，自动创建"
+            gh release create "$RELEASE_TAG" --repo "${{ github.repository }}" \
+              --title "同步自 $REPO 的 Release" \
+              --notes "该版本资产来自 $REPO@$RELEASE_TAG，自动同步于 $(date '+%Y-%m-%d %H:%M:%S')"
+          else
+            echo "✅ Release $RELEASE_TAG 已存在"
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 下载 Release 资产
+      - name: 获取目标 Release 的资产列表
         run: |
-          mkdir downloads
-          while read -r name url; do
-            echo "Downloading $name"
-            curl -L "$url" -o "downloads/$name"
-          done < assets.txt
+          API_URL="https://api.github.com/repos/$REPO/releases/tags/$RELEASE_TAG"
+          echo "Fetching release info: $API_URL"
+          curl -s "$API_URL" | jq -r '.assets[] | "\(.name)|\(.browser_download_url)"' > assets.txt
 
-      - name: 上传到当前仓库的 Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: 同步自 ${{ env.REPO }} 的 Release
-          files: downloads/*
+      - name: 下载 + 上传 + 删除（逐个处理）
+        run: |
+          mkdir -p temp
+          while IFS='|' read -r NAME URL; do
+            echo "▶️ 正在下载 $NAME"
+            curl -L "$URL" -o "temp/$NAME"
+
+            echo "⬆️ 正在上传 $NAME 到 Release $RELEASE_TAG"
+            gh release upload "$RELEASE_TAG" "temp/$NAME" --repo "${{ github.repository }}" --clobber
+
+            echo "🧹 删除本地文件 $NAME"
+            rm -f "temp/$NAME"
+          done < assets.txt
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
