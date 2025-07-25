@@ -1,0 +1,100 @@
+name: Sync Release from Other Repo
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: '目标项目仓库（如 owner/repo）'
+        required: true
+        type: string
+      release_tag:
+        description: '要同步的 Release 标签（tag）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  sync-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 设置变量
+        run: |
+          echo "REPO=${{ github.event.inputs.repo }}" >> $GITHUB_ENV
+          echo "RELEASE_TAG=${{ github.event.inputs.release_tag }}" >> $GITHUB_ENV
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq gh
+
+      - name: 获取源 Release 信息
+        run: |
+          release_json=$(curl -s "https://api.github.com/repos/$REPO/releases/tags/$RELEASE_TAG")
+          echo "$release_json" > release.json
+
+          title=$(jq -r '.name // .tag_name' release.json)
+          body=$(jq -r '.body // empty' release.json)
+          draft=$(jq -r '.draft' release.json)
+          prerelease=$(jq -r '.prerelease' release.json)
+
+          # 设置 title
+          {
+            echo "TITLE<<EOF"
+            echo "$title"
+            echo "EOF"
+          } >> $GITHUB_ENV
+
+          # 设置 body + 来源追溯信息（保持 markdown 格式）
+          {
+            echo "BODY<<EOF"
+            echo "$body"
+            echo
+            echo "---"
+            echo "本 Release 由自动同步脚本生成，来源：[${REPO}@${RELEASE_TAG}](https://github.com/${REPO}/releases/tag/${RELEASE_TAG})"
+            echo "EOF"
+          } >> $GITHUB_ENV
+
+          echo "IS_DRAFT=$draft" >> $GITHUB_ENV
+          echo "IS_PRERELEASE=$prerelease" >> $GITHUB_ENV
+
+      - name: 创建 Release（如不存在）
+        run: |
+          if ! gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "创建新 Release: $TITLE"
+            args=(--repo "${{ github.repository }}" --title "$TITLE" --notes "$BODY")
+            [[ "$IS_DRAFT" == "true" ]] && args+=("--draft")
+            [[ "$IS_PRERELEASE" == "true" ]] && args+=("--prerelease")
+            gh release create "$RELEASE_TAG" "${args[@]}"
+          else
+            echo "✅ Release 已存在，跳过创建"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: ${{ env.TITLE }}
+          BODY: ${{ env.BODY }}
+          IS_DRAFT: ${{ env.IS_DRAFT }}
+          IS_PRERELEASE: ${{ env.IS_PRERELEASE }}
+
+      - name: 获取资产列表
+        run: |
+          curl -s "https://api.github.com/repos/$REPO/releases/tags/$RELEASE_TAG" \
+          | jq -r '.assets[] | "\(.name)|\(.browser_download_url)"' > assets.txt
+
+      - name: 下载 + 上传 + 删除资产
+        run: |
+          mkdir -p temp
+          while IFS='|' read -r NAME URL; do
+            echo "⬇️ 下载: $NAME"
+            curl -L "$URL" -o "temp/$NAME"
+
+            echo "⬆️ 上传: $NAME"
+            gh release upload "$RELEASE_TAG" "temp/$NAME" --repo "${{ github.repository }}" --clobber
+
+            echo "🧹 删除: $NAME"
+            rm -f "temp/$NAME"
+          done < assets.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
