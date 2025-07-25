@@ -56,15 +56,6 @@ jobs:
           echo "IS_PRERELEASE=$prerelease" >> $GITHUB_ENV
           echo "SOURCE_COMMIT=$source_commit" >> $GITHUB_ENV
 
-      - name: 创建本地 tag（模拟原 commit）
-        run: |
-          git init
-          git remote add origin https://github.com/${{ github.repository }}
-          git fetch origin
-          git fetch https://github.com/$REPO +refs/tags/${RELEASE_TAG}:refs/tags/source-${RELEASE_TAG} || true
-          git tag -f ${RELEASE_TAG} origin/main  # 或保留为本仓库分支 commit
-          git push origin ${RELEASE_TAG} --force
-
       - name: 创建 Release（如果不存在）
         run: |
           if ! gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
