@@ -1,0 +1,50 @@
+name: Sync Release from Other Repo
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: '目标项目仓库（如 owner/repo）'
+        required: true
+        type: string
+      release_tag:
+        description: '要同步的 Release 标签（tag）'
+        required: true
+        type: string
+
+jobs:
+  sync-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 设置变量
+        id: vars
+        run: |
+          echo "REPO=${{ github.event.inputs.repo }}" >> $GITHUB_ENV
+          echo "RELEASE_TAG=${{ github.event.inputs.release_tag }}" >> $GITHUB_ENV
+
+      - name: 获取 Release 信息
+        id: release_info
+        run: |
+          release_url="https://api.github.com/repos/${{ env.REPO }}/releases/tags/${{ env.RELEASE_TAG }}"
+          echo "Release URL: $release_url"
+          assets=$(curl -s "$release_url" | jq -r '.assets[] | "\(.name) \(.browser_download_url)"')
+          echo "$assets" > assets.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 下载 Release 资产
+        run: |
+          mkdir downloads
+          while read -r name url; do
+            echo "Downloading $name"
+            curl -L "$url" -o "downloads/$name"
+          done < assets.txt
+
+      - name: 上传到当前仓库的 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: 同步自 ${{ env.REPO }} 的 Release
+          files: downloads/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
