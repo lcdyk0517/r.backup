@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       repo:
-        description: '目标项目仓库（格式: owner/repo）'
+        description: '目标项目仓库（如 owner/repo）'
         required: true
         type: string
       release_tag:
@@ -28,10 +28,9 @@ jobs:
       - name: 安装依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq gh git
+          sudo apt-get install -y jq gh
 
-      - name: 获取源 Release 信息（标题、描述、状态）
-        id: release_info
+      - name: 获取源 Release 信息
         run: |
           release_json=$(curl -s "https://api.github.com/repos/$REPO/releases/tags/$RELEASE_TAG")
           echo "$release_json" > release.json
@@ -40,32 +39,37 @@ jobs:
           body=$(jq -r '.body // empty' release.json)
           draft=$(jq -r '.draft' release.json)
           prerelease=$(jq -r '.prerelease' release.json)
-          source_commit=$(jq -r '.target_commitish // "main"' release.json)
 
-          # 添加来源追溯信息
-          extra="\n\n---\n本 Release 由自动同步脚本生成，来源：[${REPO}@${RELEASE_TAG}](https://github.com/${REPO}/releases/tag/${RELEASE_TAG})"
-          echo "TITLE<<EOF" >> $GITHUB_ENV
-          echo "$title" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          # 设置 title
+          {
+            echo "TITLE<<EOF"
+            echo "$title"
+            echo "EOF"
+          } >> $GITHUB_ENV
 
-          echo "BODY<<EOF" >> $GITHUB_ENV
-          echo "${body}${extra}" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          # 设置 body + 来源追溯信息（保持 markdown 格式）
+          {
+            echo "BODY<<EOF"
+            echo "$body"
+            echo
+            echo "---"
+            echo "本 Release 由自动同步脚本生成，来源：[${REPO}@${RELEASE_TAG}](https://github.com/${REPO}/releases/tag/${RELEASE_TAG})"
+            echo "EOF"
+          } >> $GITHUB_ENV
 
           echo "IS_DRAFT=$draft" >> $GITHUB_ENV
           echo "IS_PRERELEASE=$prerelease" >> $GITHUB_ENV
-          echo "SOURCE_COMMIT=$source_commit" >> $GITHUB_ENV
 
-      - name: 创建 Release（如果不存在）
+      - name: 创建 Release（如不存在）
         run: |
           if ! gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            echo "创建 Release: $TITLE"
+            echo "创建新 Release: $TITLE"
             args=(--repo "${{ github.repository }}" --title "$TITLE" --notes "$BODY")
             [[ "$IS_DRAFT" == "true" ]] && args+=("--draft")
             [[ "$IS_PRERELEASE" == "true" ]] && args+=("--prerelease")
             gh release create "$RELEASE_TAG" "${args[@]}"
           else
-            echo "✅ Release 已存在"
+            echo "✅ Release 已存在，跳过创建"
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -89,6 +93,7 @@ jobs:
             echo "⬆️ 上传: $NAME"
             gh release upload "$RELEASE_TAG" "temp/$NAME" --repo "${{ github.repository }}" --clobber
 
+            echo "🧹 删除: $NAME"
             rm -f "temp/$NAME"
           done < assets.txt
         env:
