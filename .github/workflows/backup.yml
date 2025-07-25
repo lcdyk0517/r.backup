@@ -12,6 +12,9 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: write
+
 jobs:
   sync-release:
     runs-on: ubuntu-latest
@@ -22,42 +25,79 @@ jobs:
           echo "REPO=${{ github.event.inputs.repo }}" >> $GITHUB_ENV
           echo "RELEASE_TAG=${{ github.event.inputs.release_tag }}" >> $GITHUB_ENV
 
-      - name: 确保已安装 jq 和 gh
+      - name: 安装依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq gh
+          sudo apt-get install -y jq gh git
 
-      - name: 检查并创建当前仓库的 Release（如不存在）
+      - name: 获取源 Release 信息（标题、描述、状态）
+        id: release_info
         run: |
-          echo "检查 Release 是否存在: $RELEASE_TAG"
+          release_json=$(curl -s "https://api.github.com/repos/$REPO/releases/tags/$RELEASE_TAG")
+          echo "$release_json" > release.json
+
+          title=$(jq -r '.name // .tag_name' release.json)
+          body=$(jq -r '.body // empty' release.json)
+          draft=$(jq -r '.draft' release.json)
+          prerelease=$(jq -r '.prerelease' release.json)
+          source_commit=$(jq -r '.target_commitish // "main"' release.json)
+
+          # 添加来源追溯信息
+          extra="\n\n---\n本 Release 由自动同步脚本生成，来源：[${REPO}@${RELEASE_TAG}](https://github.com/${REPO}/releases/tag/${RELEASE_TAG})"
+          echo "TITLE<<EOF" >> $GITHUB_ENV
+          echo "$title" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+          echo "BODY<<EOF" >> $GITHUB_ENV
+          echo "${body}${extra}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+          echo "IS_DRAFT=$draft" >> $GITHUB_ENV
+          echo "IS_PRERELEASE=$prerelease" >> $GITHUB_ENV
+          echo "SOURCE_COMMIT=$source_commit" >> $GITHUB_ENV
+
+      - name: 创建本地 tag（模拟原 commit）
+        run: |
+          git init
+          git remote add origin https://github.com/${{ github.repository }}
+          git fetch origin
+          git fetch https://github.com/$REPO +refs/tags/${RELEASE_TAG}:refs/tags/source-${RELEASE_TAG} || true
+          git tag -f ${RELEASE_TAG} origin/main  # 或保留为本仓库分支 commit
+          git push origin ${RELEASE_TAG} --force
+
+      - name: 创建 Release（如果不存在）
+        run: |
           if ! gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            echo "🔧 当前仓库未找到 Release，正在创建..."
-            gh release create "$RELEASE_TAG" --repo "${{ github.repository }}" \
-              --title "同步自 $REPO 的 Release" \
-              --notes "该版本资产来自 $REPO@$RELEASE_TAG，自动同步于 $(date '+%Y-%m-%d %H:%M:%S')"
+            echo "创建 Release: $TITLE"
+            args=(--repo "${{ github.repository }}" --title "$TITLE" --notes "$BODY")
+            [[ "$IS_DRAFT" == "true" ]] && args+=("--draft")
+            [[ "$IS_PRERELEASE" == "true" ]] && args+=("--prerelease")
+            gh release create "$RELEASE_TAG" "${args[@]}"
           else
-            echo "✅ Release 已存在，继续上传资产"
+            echo "✅ Release 已存在"
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: ${{ env.TITLE }}
+          BODY: ${{ env.BODY }}
+          IS_DRAFT: ${{ env.IS_DRAFT }}
+          IS_PRERELEASE: ${{ env.IS_PRERELEASE }}
 
-      - name: 获取目标 Release 的资产列表
+      - name: 获取资产列表
         run: |
-          API_URL="https://api.github.com/repos/$REPO/releases/tags/$RELEASE_TAG"
-          echo "Fetching: $API_URL"
-          curl -s "$API_URL" | jq -r '.assets[] | "\(.name)|\(.browser_download_url)"' > assets.txt
+          curl -s "https://api.github.com/repos/$REPO/releases/tags/$RELEASE_TAG" \
+          | jq -r '.assets[] | "\(.name)|\(.browser_download_url)"' > assets.txt
 
-      - name: 逐个下载 + 上传 + 删除
+      - name: 下载 + 上传 + 删除资产
         run: |
           mkdir -p temp
           while IFS='|' read -r NAME URL; do
-            echo "⬇️ 正在下载: $NAME"
+            echo "⬇️ 下载: $NAME"
             curl -L "$URL" -o "temp/$NAME"
 
-            echo "⬆️ 正在上传: $NAME"
+            echo "⬆️ 上传: $NAME"
             gh release upload "$RELEASE_TAG" "temp/$NAME" --repo "${{ github.repository }}" --clobber
 
-            echo "🧹 删除: $NAME"
             rm -f "temp/$NAME"
           done < assets.txt
         env:
